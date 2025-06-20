@@ -5,17 +5,21 @@ import uuid
 from datetime import datetime
 import json
 import logging
+import urllib.parse
  
 app = Flask(__name__)
-
+ 
 # Enhanced logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
  
 # In-memory storage for analysis results (use Redis/DB in production)
 analysis_results = {}
+
+# CORRECT STREAMLIT URL - Update this with your actual URL
+STREAMLIT_APP_URL = "https://criblchatbot-hswvo3hhkgngsfvmwty9ql.streamlit.app"
  
-# HTML template for viewing results (keeping your existing template)
+# HTML template for viewing results (keeping your existing template but with fixes)
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -30,18 +34,23 @@ HTML_TEMPLATE = """
         .status.success { background-color: #f0fdf4; border-left: 4px solid #22c55e; color: #16a34a; }
         .status.processing { background-color: #fef3c7; border-left: 4px solid #f59e0b; color: #92400e; }
         .status.error { background-color: #fef2f2; border-left: 4px solid #ef4444; color: #dc2626; }
-        .log-preview { background-color: #f3f4f6; padding: 15px; border-radius: 8px; margin: 10px 0; font-family: monospace; white-space: pre-wrap; }
+        .log-preview { background-color: #f3f4f6; padding: 15px; border-radius: 8px; margin: 10px 0; font-family: monospace; white-space: pre-wrap; max-height: 300px; overflow-y: auto; }
         .analysis-result { background-color: #f9fafb; padding: 15px; border-radius: 8px; margin: 10px 0; border-left: 4px solid #14b8a6; }
         .timestamp { color: #6b7280; font-size: 0.9em; }
         .refresh-btn { background-color: #14b8a6; color: white; padding: 10px 20px; border: none; border-radius: 8px; cursor: pointer; margin: 10px 0; }
         .refresh-btn:hover { background-color: #0d9488; }
         .chatbot-link { display: inline-block; background-color: #059669; color: white; padding: 8px 16px; text-decoration: none; border-radius: 6px; margin: 5px 0; }
         .chatbot-link:hover { background-color: #047857; }
-        .debug-info { background-color: #fff7ed; border: 1px solid #fed7aa; border-radius: 8px; padding: 15px; margin: 10px 0; }
+        .debug-info { background-color: #fff7ed; border: 1px solid #fed7aa; border-radius: 8px; padding: 15px; margin: 10px 0; font-size: 0.9em; }
+        .url-test { background-color: #f0f9ff; border: 1px solid #bae6fd; border-radius: 8px; padding: 15px; margin: 10px 0; }
     </style>
     <script>
         function refreshPage() {
             location.reload();
+        }
+        
+        function testUrl(url) {
+            window.open(url, '_blank');
         }
         
         // Auto-refresh every 30 seconds
@@ -61,20 +70,22 @@ HTML_TEMPLATE = """
         
         <div class="debug-info">
             <strong>Debug Info:</strong><br>
-            <strong>Expected Webhook URL:</strong> <code>{{ webhook_url }}/log-to-chatbot</code><br>
+            <strong>Streamlit App URL:</strong> <code>{{ streamlit_url }}</code><br>
+            <strong>Webhook URL:</strong> <code>{{ webhook_url }}/log-to-chatbot</code><br>
             <strong>Dashboard URL:</strong> <code>{{ webhook_url }}/dashboard</code><br>
-            <strong>Test URL:</strong> <code>{{ webhook_url }}/test</code>
+            <strong>Test URL:</strong> <code>{{ webhook_url }}/test</code><br>
+            <strong>Total Results:</strong> {{ results|length }}
         </div>
         
         {% if results %}
             {% for result_id, result in results.items() %}
             <div class="result-card">
-                <h3>Analysis #{{ loop.index }} - {{ result.timestamp }}</h3>
+                <h3>Analysis {{ result_id }} - {{ result.timestamp }}</h3>
                 
                 <div class="status {{ result.status }}">
                     <strong>Status:</strong>
                     {% if result.status == 'success' %}
-                        ✅ Analysis Complete
+                        ✅ Analysis Complete - URL Generated
                     {% elif result.status == 'processing' %}
                         ⏳ Processing...
                     {% else %}
@@ -84,22 +95,26 @@ HTML_TEMPLATE = """
                 
                 <div class="log-preview">
                     <strong>Log Data Preview:</strong><br>
-                    {{ result.log_preview }}...
+                    {{ result.log_preview }}
                 </div>
                 
                 {% if result.debug_info %}
                 <div class="debug-info">
                     <strong>Debug Info:</strong><br>
                     Content-Type: {{ result.debug_info.content_type }}<br>
-                    Data Length: {{ result.debug_info.data_length }}<br>
-                    Headers: {{ result.debug_info.headers }}
+                    Data Length: {{ result.debug_info.data_length }} characters<br>
+                    Request Method: {{ result.debug_info.get('method', 'Unknown') }}<br>
+                    URL Length: {{ result.chatbot_url|length if result.chatbot_url else 'N/A' }} characters
                 </div>
                 {% endif %}
                 
                 {% if result.chatbot_url %}
-                <a href="{{ result.chatbot_url }}" target="_blank" class="chatbot-link">
-                    🔗 View Full Analysis in Chatbot
-                </a>
+                <div class="url-test">
+                    <button onclick="testUrl('{{ result.chatbot_url }}')" class="chatbot-link">
+                        🔗 Open Analysis in Streamlit (New Window)
+                    </button>
+                    <br><small>Click to open in new window - this should trigger the analysis</small>
+                </div>
                 {% endif %}
                 
                 {% if result.error %}
@@ -114,6 +129,11 @@ HTML_TEMPLATE = """
                 <h3>No Analysis Results Yet</h3>
                 <p>Waiting for log analysis requests from Cribl Stream...</p>
                 <p><strong>Webhook URL:</strong> <code>{{ webhook_url }}/log-to-chatbot</code></p>
+                <div class="url-test">
+                    <button onclick="testUrl('{{ webhook_url }}/test')" class="chatbot-link">
+                        🧪 Test Webhook Endpoint
+                    </button>
+                </div>
             </div>
         {% endif %}
     </div>
@@ -124,7 +144,7 @@ HTML_TEMPLATE = """
 @app.route("/", methods=["GET"])
 def home():
     return "✅ Cribl Log Relay API is running", 200
-
+ 
 @app.route("/test", methods=["GET", "POST"])
 def test_endpoint():
     """Test endpoint to verify webhook functionality"""
@@ -132,11 +152,30 @@ def test_endpoint():
         return jsonify({
             "message": "Test endpoint is working",
             "webhook_url": f"{request.url_root}log-to-chatbot",
-            "dashboard_url": f"{request.url_root}dashboard"
+            "dashboard_url": f"{request.url_root}dashboard",
+            "streamlit_url": STREAMLIT_APP_URL
         })
     else:
-        # Handle POST for testing
-        return receive_log()
+        # Handle POST for testing with sample data
+        return receive_log_with_test_data()
+
+def receive_log_with_test_data():
+    """Handle test POST request with sample data"""
+    test_data = {
+        "timestamp": datetime.now().isoformat(),
+        "user": "test_user",
+        "action": "login_attempt",
+        "source_ip": "192.168.1.100",
+        "status": "success",
+        "test": True
+    }
+    
+    # Override request data for testing
+    import json
+    request._cached_data = json.dumps(test_data).encode()
+    request._cached_json = test_data
+    
+    return receive_log()
  
 @app.route("/dashboard", methods=["GET"])
 def dashboard():
@@ -144,8 +183,9 @@ def dashboard():
     webhook_url = request.url_root.rstrip('/')
     return render_template_string(HTML_TEMPLATE,
                                 results=analysis_results,
-                                webhook_url=webhook_url)
-
+                                webhook_url=webhook_url,
+                                streamlit_url=STREAMLIT_APP_URL)
+ 
 @app.route("/log-to-chatbot", methods=["GET", "POST", "PUT"])
 def receive_log():
     """Enhanced webhook endpoint with better debugging"""
@@ -158,9 +198,10 @@ def receive_log():
     if request.method == "GET":
         return jsonify({
             "message": "Webhook endpoint is active",
-            "expected_method": "POST",
+            "expected_method": "POST or PUT",
             "content_type": "text/plain or application/json",
-            "dashboard_url": f"{request.url_root}dashboard"
+            "dashboard_url": f"{request.url_root}dashboard",
+            "streamlit_url": STREAMLIT_APP_URL
         })
     
     # Handle different content types from Cribl
@@ -170,7 +211,7 @@ def receive_log():
             data = request.get_json()
             if isinstance(data, list):
                 # Multiple log entries
-                logs = '\n'.join([json.dumps(entry) if isinstance(entry, dict) else str(entry) for entry in data])
+                logs = '\n'.join([json.dumps(entry, indent=2) if isinstance(entry, dict) else str(entry) for entry in data])
             elif isinstance(data, dict):
                 # Single log entry
                 logs = json.dumps(data, indent=2)
@@ -204,7 +245,7 @@ def receive_log():
             }
         }), 400
     
-    analysis_id = str(uuid.uuid4())[:8]
+    analysis_id = f"cribl_{str(uuid.uuid4())[:8]}"
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     logger.info(f"📥 Processing log analysis request #{analysis_id}")
@@ -220,51 +261,54 @@ def receive_log():
         "debug_info": {
             "content_type": request.content_type,
             "data_length": len(logs),
+            "method": request.method,
             "headers": dict(request.headers)
         }
     }
  
     # Enhanced prompt for better analysis
-    prompt = f"""CRIBL STREAM LOG ANALYSIS REQUEST #{analysis_id}
- 
+    prompt = f"""Analysis ID: {analysis_id}
+
+CRIBL STREAM LOG ANALYSIS REQUEST
+
 Timestamp: {timestamp}
- 
-Log Data:
+Source: Cribl Stream Webhook
+
+Log Data for Security Analysis:
 {logs}
- 
-Please perform comprehensive predictive and prescriptive analysis including:
-1. Risk assessment and threat level
-2. Behavioral pattern analysis  
-3. Anomaly detection
-4. Recommended immediate actions
-5. Long-term security improvements
- 
-Analysis ID: {analysis_id}"""
+
+Please perform comprehensive predictive and prescriptive security analysis including:
+
+🚨 THREAT LEVEL: [Assess as LOW/MEDIUM/HIGH/CRITICAL]
+📊 RISK SCORE: [Rate 1-10]
+🔍 KEY FINDINGS: [Summary of suspicious activities]
+⚡ IMMEDIATE ACTIONS: [Critical next steps]
+🛡️ RECOMMENDATIONS: [Long-term improvements]
+
+Focus on insider threats, anomalous behavior, and security incidents."""
  
     try:
-        # URL encode the prompt properly - use quote_plus for better URL encoding
-        encoded_prompt = requests.utils.quote_plus(prompt)
-        chatbot_url = f"https://criblchatbot-ksbwyaufrk8t2lt6dmhdgc.streamlit.app/?prompt={encoded_prompt}"
+        # URL encode the prompt properly
+        encoded_prompt = urllib.parse.quote(prompt, safe='')
+        chatbot_url = f"{STREAMLIT_APP_URL}?prompt={encoded_prompt}"
         
         # Update with chatbot URL
         analysis_results[analysis_id]["chatbot_url"] = chatbot_url
-        
-        # Don't test the chatbot URL directly as Streamlit doesn't respond to GET requests in the traditional way
-        # Instead, just mark as success since the URL is properly formatted
-        chatbot_status = "url_generated"
-        
         analysis_results[analysis_id]["status"] = "success"
+        
         logger.info(f"✅ Analysis #{analysis_id} URL generated successfully")
-        logger.info(f"Chatbot URL: {chatbot_url[:100]}...")
+        logger.info(f"Chatbot URL length: {len(chatbot_url)} characters")
+        logger.info(f"Streamlit URL: {STREAMLIT_APP_URL}")
             
         return jsonify({
             "status": "success",
             "analysis_id": analysis_id,
-            "message": f"Log analysis #{analysis_id} initiated",
+            "message": f"Log analysis #{analysis_id} initiated successfully",
             "chatbot_url": chatbot_url,
             "dashboard_url": f"{request.url_root}dashboard",
-            "chatbot_status": chatbot_status,
-            "log_preview": logs[:200]
+            "streamlit_base_url": STREAMLIT_APP_URL,
+            "log_preview": logs[:200],
+            "instructions": "Click the chatbot URL to view the analysis in Streamlit"
         }), 200
         
     except Exception as e:
@@ -279,12 +323,78 @@ Analysis ID: {analysis_id}"""
             "dashboard_url": f"{request.url_root}dashboard"
         }), 500
 
-# Add a catch-all route for debugging
-@app.route("/log-to-chatbot/<path:extra>", methods=["GET", "POST", "PUT"])
-def receive_log_with_extra(extra):
-    """Catch requests with extra path components"""
-    logger.warning(f"⚠️ Request to /log-to-chatbot/{extra} - redirecting to main endpoint")
-    return receive_log()
+# Test endpoint to manually trigger analysis
+@app.route("/test-analysis", methods=["POST"])
+def test_analysis():
+    """Manually test the analysis flow"""
+    test_logs = """
+    {
+        "timestamp": "2024-01-15T10:30:00Z",
+        "user": "john.doe",
+        "action": "file_access",
+        "file_path": "/sensitive/financial_data.xlsx",
+        "source_ip": "192.168.1.100",
+        "department": "IT",
+        "access_time": "02:30:00",
+        "status": "success",
+        "unusual_activity": "accessing sensitive files outside business hours"
+    }
+    """
+    
+    # Simulate the webhook request
+    analysis_id = f"test_{str(uuid.uuid4())[:8]}"
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    analysis_results[analysis_id] = {
+        "timestamp": timestamp,
+        "log_preview": test_logs[:500],
+        "status": "processing",
+        "chatbot_url": None,
+        "error": None,
+        "debug_info": {
+            "content_type": "application/json",
+            "data_length": len(test_logs),
+            "method": "POST (Test)",
+            "headers": {"test": "true"}
+        }
+    }
+    
+    prompt = f"""Analysis ID: {analysis_id}
+
+TEST LOG ANALYSIS REQUEST
+
+Timestamp: {timestamp}
+Source: Manual Test
+
+Log Data for Security Analysis:
+{test_logs}
+
+Please perform comprehensive security analysis of this test data."""
+    
+    try:
+        encoded_prompt = urllib.parse.quote(prompt, safe='')
+        chatbot_url = f"{STREAMLIT_APP_URL}?prompt={encoded_prompt}"
+        
+        analysis_results[analysis_id]["chatbot_url"] = chatbot_url
+        analysis_results[analysis_id]["status"] = "success"
+        
+        return jsonify({
+            "status": "success",
+            "analysis_id": analysis_id,
+            "message": "Test analysis created successfully",
+            "chatbot_url": chatbot_url,
+            "dashboard_url": f"{request.url_root}dashboard"
+        }), 200
+        
+    except Exception as e:
+        analysis_results[analysis_id]["status"] = "error"
+        analysis_results[analysis_id]["error"] = str(e)
+        
+        return jsonify({
+            "status": "error",
+            "analysis_id": analysis_id,
+            "message": str(e)
+        }), 500
  
 @app.route("/results/<analysis_id>", methods=["GET"])
 def get_result(analysis_id):
@@ -306,6 +416,20 @@ def clear_results():
     analysis_results = {}
     return jsonify({"message": "All results cleared"})
 
+# Add debugging route
+@app.route("/debug", methods=["GET"])
+def debug_info():
+    """Debug information endpoint"""
+    return jsonify({
+        "streamlit_url": STREAMLIT_APP_URL,
+        "total_results": len(analysis_results),
+        "recent_results": list(analysis_results.keys())[-5:] if analysis_results else [],
+        "environment": {
+            "port": os.environ.get("PORT", 5000),
+            "debug": app.debug
+        }
+    })
+ 
 # Add error handlers
 @app.errorhandler(404)
 def not_found(error):
@@ -314,13 +438,15 @@ def not_found(error):
         "error": "Endpoint not found",
         "available_endpoints": [
             "/",
-            "/dashboard", 
+            "/dashboard",
             "/log-to-chatbot",
             "/test",
-            "/results"
+            "/test-analysis",
+            "/results",
+            "/debug"
         ]
     }), 404
-
+ 
 @app.errorhandler(500)
 def internal_error(error):
     logger.error(f"500 error: {str(error)}")
