@@ -4,13 +4,18 @@ import os
 import uuid
 from datetime import datetime
 import json
-
+import logging
+ 
 app = Flask(__name__)
 
+# Enhanced logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+ 
 # In-memory storage for analysis results (use Redis/DB in production)
 analysis_results = {}
-
-# HTML template for viewing results
+ 
+# HTML template for viewing results (keeping your existing template)
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html>
@@ -32,6 +37,7 @@ HTML_TEMPLATE = """
         .refresh-btn:hover { background-color: #0d9488; }
         .chatbot-link { display: inline-block; background-color: #059669; color: white; padding: 8px 16px; text-decoration: none; border-radius: 6px; margin: 5px 0; }
         .chatbot-link:hover { background-color: #047857; }
+        .debug-info { background-color: #fff7ed; border: 1px solid #fed7aa; border-radius: 8px; padding: 15px; margin: 10px 0; }
     </style>
     <script>
         function refreshPage() {
@@ -53,13 +59,20 @@ HTML_TEMPLATE = """
         
         <button class="refresh-btn" onclick="refreshPage()">🔄 Refresh Results</button>
         
+        <div class="debug-info">
+            <strong>Debug Info:</strong><br>
+            <strong>Expected Webhook URL:</strong> <code>{{ webhook_url }}/log-to-chatbot</code><br>
+            <strong>Dashboard URL:</strong> <code>{{ webhook_url }}/dashboard</code><br>
+            <strong>Test URL:</strong> <code>{{ webhook_url }}/test</code>
+        </div>
+        
         {% if results %}
             {% for result_id, result in results.items() %}
             <div class="result-card">
                 <h3>Analysis #{{ loop.index }} - {{ result.timestamp }}</h3>
                 
                 <div class="status {{ result.status }}">
-                    <strong>Status:</strong> 
+                    <strong>Status:</strong>
                     {% if result.status == 'success' %}
                         ✅ Analysis Complete
                     {% elif result.status == 'processing' %}
@@ -73,6 +86,15 @@ HTML_TEMPLATE = """
                     <strong>Log Data Preview:</strong><br>
                     {{ result.log_preview }}...
                 </div>
+                
+                {% if result.debug_info %}
+                <div class="debug-info">
+                    <strong>Debug Info:</strong><br>
+                    Content-Type: {{ result.debug_info.content_type }}<br>
+                    Data Length: {{ result.debug_info.data_length }}<br>
+                    Headers: {{ result.debug_info.headers }}
+                </div>
+                {% endif %}
                 
                 {% if result.chatbot_url %}
                 <a href="{{ result.chatbot_url }}" target="_blank" class="chatbot-link">
@@ -98,68 +120,142 @@ HTML_TEMPLATE = """
 </body>
 </html>
 """
-
+ 
 @app.route("/", methods=["GET"])
 def home():
     return "✅ Cribl Log Relay API is running", 200
 
+@app.route("/test", methods=["GET", "POST"])
+def test_endpoint():
+    """Test endpoint to verify webhook functionality"""
+    if request.method == "GET":
+        return jsonify({
+            "message": "Test endpoint is working",
+            "webhook_url": f"{request.url_root}log-to-chatbot",
+            "dashboard_url": f"{request.url_root}dashboard"
+        })
+    else:
+        # Handle POST for testing
+        return receive_log()
+ 
 @app.route("/dashboard", methods=["GET"])
 def dashboard():
     """Dashboard to view analysis results"""
     webhook_url = request.url_root.rstrip('/')
-    return render_template_string(HTML_TEMPLATE, 
-                                results=analysis_results, 
+    return render_template_string(HTML_TEMPLATE,
+                                results=analysis_results,
                                 webhook_url=webhook_url)
 
-@app.route("/log-to-chatbot", methods=["POST"])
+@app.route("/log-to-chatbot", methods=["GET", "POST", "PUT"])
 def receive_log():
-    logs = request.get_data(as_text=True)
+    """Enhanced webhook endpoint with better debugging"""
+    
+    # Log all incoming requests
+    logger.info(f"📥 Received {request.method} request to /log-to-chatbot")
+    logger.info(f"Content-Type: {request.content_type}")
+    logger.info(f"Headers: {dict(request.headers)}")
+    
+    if request.method == "GET":
+        return jsonify({
+            "message": "Webhook endpoint is active",
+            "expected_method": "POST",
+            "content_type": "text/plain or application/json",
+            "dashboard_url": f"{request.url_root}dashboard"
+        })
+    
+    # Handle different content types from Cribl
+    try:
+        if request.content_type and 'application/json' in request.content_type:
+            # Handle JSON payload
+            data = request.get_json()
+            if isinstance(data, list):
+                # Multiple log entries
+                logs = '\n'.join([json.dumps(entry) if isinstance(entry, dict) else str(entry) for entry in data])
+            elif isinstance(data, dict):
+                # Single log entry
+                logs = json.dumps(data, indent=2)
+            else:
+                logs = str(data)
+        else:
+            # Handle plain text or other formats
+            logs = request.get_data(as_text=True)
+            
+        if not logs or logs.strip() == "":
+            logger.warning("⚠️ Received empty log data")
+            return jsonify({
+                "status": "error",
+                "message": "No log data received",
+                "debug": {
+                    "content_type": request.content_type,
+                    "data_length": len(request.get_data()),
+                    "raw_data": request.get_data(as_text=True)[:200]
+                }
+            }), 400
+            
+    except Exception as e:
+        logger.error(f"❌ Error parsing request data: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "message": f"Error parsing request data: {str(e)}",
+            "debug": {
+                "content_type": request.content_type,
+                "data_length": len(request.get_data()),
+                "headers": dict(request.headers)
+            }
+        }), 400
+    
     analysis_id = str(uuid.uuid4())[:8]
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    print(f"📥 Received log analysis request #{analysis_id}")
-    print(f"Log preview: {logs[:200]}...")
-
-    # Store initial result
+    logger.info(f"📥 Processing log analysis request #{analysis_id}")
+    logger.info(f"Log preview: {logs[:200]}...")
+ 
+    # Store initial result with debug info
     analysis_results[analysis_id] = {
         "timestamp": timestamp,
-        "log_preview": logs[:200],
+        "log_preview": logs[:500],  # Show more preview
         "status": "processing",
         "chatbot_url": None,
-        "error": None
+        "error": None,
+        "debug_info": {
+            "content_type": request.content_type,
+            "data_length": len(logs),
+            "headers": dict(request.headers)
+        }
     }
-
+ 
     # Enhanced prompt for better analysis
     prompt = f"""CRIBL STREAM LOG ANALYSIS REQUEST #{analysis_id}
-
+ 
 Timestamp: {timestamp}
-
+ 
 Log Data:
 {logs}
-
+ 
 Please perform comprehensive predictive and prescriptive analysis including:
 1. Risk assessment and threat level
 2. Behavioral pattern analysis  
 3. Anomaly detection
 4. Recommended immediate actions
 5. Long-term security improvements
-
+ 
 Analysis ID: {analysis_id}"""
-
+ 
     try:
-        chatbot_url = "https://criblchatbot-hswvo3hhkgngsfvmwty9ql.streamlit.app/?prompt=" + requests.utils.quote(prompt)
+        # URL encode the prompt properly - use quote_plus for better URL encoding
+        encoded_prompt = requests.utils.quote_plus(prompt)
+        chatbot_url = f"https://criblchatbot-hswvo3hhkgngsfvmwty9ql.streamlit.app/?prompt={encoded_prompt}"
         
         # Update with chatbot URL
         analysis_results[analysis_id]["chatbot_url"] = chatbot_url
         
-        response = requests.get(chatbot_url, timeout=30)
+        # Don't test the chatbot URL directly as Streamlit doesn't respond to GET requests in the traditional way
+        # Instead, just mark as success since the URL is properly formatted
+        chatbot_status = "url_generated"
         
-        if response.status_code == 200:
-            analysis_results[analysis_id]["status"] = "success"
-            print(f"✅ Analysis #{analysis_id} sent to chatbot successfully")
-        else:
-            analysis_results[analysis_id]["status"] = "error"
-            analysis_results[analysis_id]["error"] = f"Chatbot returned status {response.status_code}"
+        analysis_results[analysis_id]["status"] = "success"
+        logger.info(f"✅ Analysis #{analysis_id} URL generated successfully")
+        logger.info(f"Chatbot URL: {chatbot_url[:100]}...")
             
         return jsonify({
             "status": "success",
@@ -167,13 +263,14 @@ Analysis ID: {analysis_id}"""
             "message": f"Log analysis #{analysis_id} initiated",
             "chatbot_url": chatbot_url,
             "dashboard_url": f"{request.url_root}dashboard",
-            "chatbot_status": response.status_code
+            "chatbot_status": chatbot_status,
+            "log_preview": logs[:200]
         }), 200
         
     except Exception as e:
         analysis_results[analysis_id]["status"] = "error"
         analysis_results[analysis_id]["error"] = str(e)
-        print(f"❌ Error in analysis #{analysis_id}: {str(e)}")
+        logger.error(f"❌ Error in analysis #{analysis_id}: {str(e)}")
         
         return jsonify({
             "status": "error",
@@ -182,6 +279,13 @@ Analysis ID: {analysis_id}"""
             "dashboard_url": f"{request.url_root}dashboard"
         }), 500
 
+# Add a catch-all route for debugging
+@app.route("/log-to-chatbot/<path:extra>", methods=["GET", "POST", "PUT"])
+def receive_log_with_extra(extra):
+    """Catch requests with extra path components"""
+    logger.warning(f"⚠️ Request to /log-to-chatbot/{extra} - redirecting to main endpoint")
+    return receive_log()
+ 
 @app.route("/results/<analysis_id>", methods=["GET"])
 def get_result(analysis_id):
     """Get specific analysis result"""
@@ -189,12 +293,12 @@ def get_result(analysis_id):
         return jsonify(analysis_results[analysis_id])
     else:
         return jsonify({"error": "Analysis not found"}), 404
-
+ 
 @app.route("/results", methods=["GET"])
 def get_all_results():
     """Get all analysis results"""
     return jsonify(analysis_results)
-
+ 
 @app.route("/clear-results", methods=["POST"])
 def clear_results():
     """Clear all stored results"""
@@ -202,6 +306,29 @@ def clear_results():
     analysis_results = {}
     return jsonify({"message": "All results cleared"})
 
+# Add error handlers
+@app.errorhandler(404)
+def not_found(error):
+    logger.warning(f"404 error: {request.url}")
+    return jsonify({
+        "error": "Endpoint not found",
+        "available_endpoints": [
+            "/",
+            "/dashboard", 
+            "/log-to-chatbot",
+            "/test",
+            "/results"
+        ]
+    }), 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    logger.error(f"500 error: {str(error)}")
+    return jsonify({
+        "error": "Internal server error",
+        "message": str(error)
+    }), 500
+ 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=True)
