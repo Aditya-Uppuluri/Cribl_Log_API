@@ -147,7 +147,7 @@ Please perform comprehensive predictive and prescriptive analysis including:
 Analysis ID: {analysis_id}"""
 
     try:
-        chatbot_url = "https://criblchatbot-7wojtkdi3kur7kcekpeqcj.streamlit.app/?prompt=" + requests.utils.quote(prompt)
+        chatbot_url = "https://criblchatbot-hswvo3hhkgngsfvmwty9ql.streamlit.app/?prompt=" + requests.utils.quote(prompt)
         
         # Update with chatbot URL
         analysis_results[analysis_id]["chatbot_url"] = chatbot_url
