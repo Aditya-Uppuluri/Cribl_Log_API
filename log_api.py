@@ -244,7 +244,7 @@ Analysis ID: {analysis_id}"""
     try:
         # URL encode the prompt properly - use quote_plus for better URL encoding
         encoded_prompt = requests.utils.quote_plus(prompt)
-        chatbot_url = f"https://criblchatbot-hswvo3hhkgngsfvmwty9ql.streamlit.app/?prompt={encoded_prompt}"
+        chatbot_url = f"https://criblchatbot-ksbwyaufrk8t2lt6dmhdgc.streamlit.app/?prompt={encoded_prompt}"
         
         # Update with chatbot URL
         analysis_results[analysis_id]["chatbot_url"] = chatbot_url
