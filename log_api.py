@@ -7,12 +7,9 @@ import json
 import gzip
 import logging
 import urllib.parse
-from collections import deque 
 
 app = Flask(__name__)
-# Global buffer to store the last 100 log entries
-log_buffer = deque(maxlen=100) # <-- ADD THIS LINE
-
+ 
 # Enhanced logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
@@ -194,46 +191,131 @@ def dashboard():
 # Replace your receive_log() function with this enhanced version:
 @app.route("/log-to-chatbot", methods=["GET", "POST", "PUT"])
 def receive_log():
-    """
-    UPDATED: Buffers logs, stores the full prompt, and creates a small URL with an analysis_id.
-    """
+    """Enhanced webhook endpoint with GZIP decompression support"""
+    
+    # Log all incoming requests
     logger.info(f"📥 Received {request.method} request to /log-to-chatbot")
+    logger.info(f"Content-Type: {request.content_type}")
+    logger.info(f"Content-Encoding: {request.headers.get('Content-Encoding', 'None')}")
+    
     if request.method == "GET":
-        return jsonify({ "message": "Webhook endpoint is active. POST log data here." })
-
-    # --- Data parsing logic ---
+        return jsonify({
+            "message": "Webhook endpoint is active",
+            "expected_method": "POST or PUT",
+            "content_type": "text/plain or application/json",
+            "dashboard_url": f"{request.url_root}dashboard",
+            "streamlit_url": STREAMLIT_APP_URL
+        })
+    
+    # Handle different content types and encodings from Cribl
     try:
+        # Get raw data first
         raw_data = request.get_data()
+        
+        # Check if data is GZIP compressed
         if request.headers.get('Content-Encoding') == 'gzip':
             logger.info("🗜️ Decompressing GZIP data...")
-            decompressed_data = gzip.decompress(raw_data)
-            data_text = decompressed_data.decode('utf-8')
+            try:
+                # Decompress GZIP data
+                decompressed_data = gzip.decompress(raw_data)
+                data_text = decompressed_data.decode('utf-8')
+                logger.info(f"✅ Successfully decompressed {len(raw_data)} bytes to {len(data_text)} characters")
+            except Exception as decomp_error:
+                logger.error(f"❌ GZIP decompression failed: {str(decomp_error)}")
+                return jsonify({
+                    "status": "error",
+                    "message": f"GZIP decompression failed: {str(decomp_error)}",
+                    "debug": {
+                        "content_encoding": request.headers.get('Content-Encoding'),
+                        "content_length": len(raw_data),
+                        "raw_data_preview": str(raw_data[:50])
+                    }
+                }), 400
         else:
+            # Not compressed, use as-is
             data_text = raw_data.decode('utf-8')
+        
+        # Now parse the decompressed/raw data
+        if request.content_type and 'application/json' in request.content_type:
+            # Handle JSON payload
+            try:
+                data = json.loads(data_text)
+                if isinstance(data, list):
+                    # Multiple log entries
+                    logs = '\n'.join([json.dumps(entry, indent=2) if isinstance(entry, dict) else str(entry) for entry in data])
+                elif isinstance(data, dict):
+                    # Single log entry
+                    logs = json.dumps(data, indent=2)
+                else:
+                    logs = str(data)
+            except json.JSONDecodeError:
+                # If JSON parsing fails, treat as text
+                logs = data_text
+        elif request.content_type and 'ndjson' in request.content_type:
+            # Handle NDJSON (newline-delimited JSON)
+            logger.info("📄 Processing NDJSON data...")
+            logs_list = []
+            for line in data_text.strip().split('\n'):
+                if line.strip():
+                    try:
+                        parsed_line = json.loads(line)
+                        logs_list.append(json.dumps(parsed_line, indent=2))
+                    except json.JSONDecodeError:
+                        logs_list.append(line)
+            logs = '\n'.join(logs_list)
+        else:
+            # Handle plain text or other formats
+            logs = data_text
+            
+        if not logs or logs.strip() == "":
+            logger.warning("⚠️ Received empty log data after processing")
+            return jsonify({
+                "status": "error",
+                "message": "No log data received after processing",
+                "debug": {
+                    "content_type": request.content_type,
+                    "content_encoding": request.headers.get('Content-Encoding'),
+                    "raw_data_length": len(raw_data),
+                    "processed_data_length": len(data_text) if 'data_text' in locals() else 0
+                }
+            }), 400
+            
     except Exception as e:
         logger.error(f"❌ Error parsing request data: {str(e)}")
-        return jsonify({ "status": "error", "message": f"Error parsing request data: {str(e)}" }), 400
-
-    # --- Log buffering logic ---
-    if data_text and data_text.strip():
-        # Split by newline to handle multiple log lines in a single payload
-        new_entries = data_text.strip().split('\n')
-        log_buffer.extend(new_entries)
-        logger.info(f"📝 Added {len(new_entries)} new entries. Buffer size is now {len(log_buffer)}.")
-    else:
-        logger.warning("⚠️ Received empty log data. No entries added to buffer.")
-        # Acknowledge the request without creating an analysis task
-        return jsonify({"status": "acknowledged", "message": "Request contained empty log data."}), 200
-
-    # The 'logs' for analysis is the consolidated content of the entire buffer
-    logs = "\n".join(log_buffer)
-
+        return jsonify({
+            "status": "error",
+            "message": f"Error parsing request data: {str(e)}",
+            "debug": {
+                "content_type": request.content_type,
+                "content_encoding": request.headers.get('Content-Encoding'),
+                "data_length": len(request.get_data()),
+                "headers": dict(request.headers)
+            }
+        }), 400
+    
     analysis_id = f"cribl_{str(uuid.uuid4())[:8]}"
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
-    logger.info(f"⚙️ Processing analysis request #{analysis_id} using the last {len(log_buffer)} log entries.")
-
-    # Enhanced prompt that uses the entire log buffer
+    logger.info(f"📥 Processing log analysis request #{analysis_id}")
+    logger.info(f"Processed log preview: {logs[:200]}...")
+ 
+    # Store initial result with debug info
+    analysis_results[analysis_id] = {
+        "timestamp": timestamp,
+        "log_preview": logs[:500],  # Show more preview
+        "status": "processing",
+        "chatbot_url": None,
+        "error": None,
+        "debug_info": {
+            "content_type": request.content_type,
+            "content_encoding": request.headers.get('Content-Encoding'),
+            "data_length": len(logs),
+            "method": request.method,
+            "headers": dict(request.headers)
+        }
+    }
+ 
+    # Enhanced prompt for better analysis
     prompt = f"""Analysis ID: {analysis_id}
 
 CRIBL STREAM LOG ANALYSIS REQUEST
@@ -241,54 +323,43 @@ CRIBL STREAM LOG ANALYSIS REQUEST
 Timestamp: {timestamp}
 Source: Cribl Stream Webhook
 
-Here is the context of the last {len(log_buffer)} log entries for security analysis:
---- LOGS START ---
+Log Data for Security Analysis:
 {logs}
---- LOGS END ---
 
-Please perform comprehensive predictive and prescriptive security analysis on the *entire set* of logs provided above. Focus on identifying trends, insider threats, anomalous behavior, and potential security incidents within this collection of logs. Provide the analysis in the requested structured format:
+Please perform comprehensive predictive and prescriptive security analysis including:
 
-🚨 THREAT LEVEL:
-📊 RISK SCORE:
-🔍 KEY FINDINGS:
-⚡ IMMEDIATE ACTIONS:
-🛡️ RECOMMENDATIONS:
-"""
+🚨 THREAT LEVEL: [Assess as LOW/MEDIUM/HIGH/CRITICAL]
+📊 RISK SCORE: [Rate 1-10]
+🔍 KEY FINDINGS: [Summary of suspicious activities]
+⚡ IMMEDIATE ACTIONS: [Critical next steps]
+🛡️ RECOMMENDATIONS: [Long-term improvements]
 
-    # --- Create short URL and store full prompt for fetching ---
-
-    # 1. Create a short URL with only the analysis_id
-    chatbot_url = f"{STREAMLIT_APP_URL}?analysis_id={analysis_id}"
-
-    # 2. Store the full, complete prompt in our results dictionary
-    # The Streamlit app will fetch this in the background.
-    analysis_results[analysis_id] = {
-        "timestamp": timestamp,
-        "log_preview": f"--- CONTEXT: LAST {len(log_buffer)} LOGS ---\n{logs[:500]}",
-        "status": "processing",
-        "chatbot_url": chatbot_url, # The short URL is stored here
-        "full_prompt": prompt,     # The full prompt is stored here
-        "error": None,
-        "debug_info": {
-            "content_type": request.content_type,
-            "buffer_size": len(log_buffer),
-            "method": request.method,
-        }
-    }
-    
+Focus on insider threats, anomalous behavior, and security incidents."""
+ 
     try:
-        # Finalize the result as successful and ready to be fetched
+        # URL encode the prompt properly
+        encoded_prompt = urllib.parse.quote(prompt, safe='')
+        chatbot_url = f"{STREAMLIT_APP_URL}?prompt={encoded_prompt}"
+        
+        # Update with chatbot URL
+        analysis_results[analysis_id]["chatbot_url"] = chatbot_url
         analysis_results[analysis_id]["status"] = "success"
-        logger.info(f"✅ Analysis #{analysis_id} is ready to be fetched at URL: {chatbot_url}")
-
+        
+        logger.info(f"✅ Analysis #{analysis_id} URL generated successfully")
+        logger.info(f"Chatbot URL length: {len(chatbot_url)} characters")
+        logger.info(f"Readable log preview: {logs[:100]}...")
+            
         return jsonify({
             "status": "success",
             "analysis_id": analysis_id,
-            "message": f"Analysis for the last {len(log_buffer)} logs is ready to be fetched.",
-            "chatbot_url": chatbot_url, # Return the short URL
-            "dashboard_url": f"{request.url_root}dashboard"
+            "message": f"Log analysis #{analysis_id} initiated successfully",
+            "chatbot_url": chatbot_url,
+            "dashboard_url": f"{request.url_root}dashboard",
+            "streamlit_base_url": STREAMLIT_APP_URL,
+            "log_preview": logs[:200],
+            "instructions": "Click the chatbot URL to view the analysis in Streamlit"
         }), 200
-
+        
     except Exception as e:
         analysis_results[analysis_id]["status"] = "error"
         analysis_results[analysis_id]["error"] = str(e)
@@ -389,15 +460,10 @@ def get_all_results():
  
 @app.route("/clear-results", methods=["POST"])
 def clear_results():
-    """Clear all stored results and the log buffer."""
+    """Clear all stored results"""
     global analysis_results
     analysis_results = {}
-    
-    # NEW: Clear the log buffer as well
-    log_buffer.clear()
-    
-    logger.info("🗑️ Cleared all analysis results and the log buffer.")
-    return jsonify({"message": "All results and the log buffer have been cleared"})
+    return jsonify({"message": "All results cleared"})
 
 # Add debugging route
 @app.route("/debug", methods=["GET"])
