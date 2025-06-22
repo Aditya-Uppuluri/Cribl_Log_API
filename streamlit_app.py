@@ -7,8 +7,11 @@ from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.prompts import ChatPromptTemplate
 import urllib.parse
 import json
+import requests
 from datetime import datetime
 import re
+
+WEBSERVICE_URL = "https://cribl-log-api.onrender.com"
 
 # Load Gemini API key from secrets
 gemini_key = st.secrets.get("GEMINI_API_KEY")
@@ -200,27 +203,50 @@ webhook_prompt = None
 analysis_id = None
 is_webhook_request = False
 
-if "prompt" in query_params:
-    try:
-        webhook_prompt = urllib.parse.unquote_plus(query_params["prompt"])
-        analysis_id = extract_analysis_id(webhook_prompt)
-        is_webhook_request = True
-        
-        # Create webhook hash for duplicate detection
-        webhook_hash = get_webhook_hash(webhook_prompt)
-        
-        st.markdown(f"""
-        <div class="webhook-status">
-            <strong>🔗 Webhook Request Received</strong><br>
-            Analysis ID: <code>{analysis_id or 'Auto-generated'}</code><br>
-            Processing log analysis request from Cribl Stream...<br>
-            <small>Hash: {webhook_hash}</small>
-        </div>
-        """, unsafe_allow_html=True)
-        
-    except Exception as e:
-        st.error(f"Error processing webhook prompt: {str(e)}")
-        webhook_prompt = None
+# In your Streamlit app file
+# ADD THIS NEW BLOCK IN ITS PLACE
+
+# Check for webhook analysis_id parameter
+query_params = st.query_params
+webhook_prompt = None
+is_webhook_request = False
+
+if "analysis_id" in query_params:
+    analysis_id = query_params["analysis_id"]
+    is_webhook_request = True
+    
+    # Use a hash of the ID for duplicate detection
+    webhook_hash = get_webhook_hash(analysis_id)
+
+    st.markdown(f"""
+    <div class="webhook-status">
+        <strong>🔗 Webhook Request Received</strong><br>
+        Analysis ID: <code>{analysis_id}</code><br>
+        Fetching log data from webservice...
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # Check if this ID was already processed
+    if webhook_hash not in st.session_state.processed_webhooks:
+        try:
+            # PULL the data from the webservice
+            fetch_url = f"{WEBSERVICE_URL}/results/{analysis_id}"
+            response = requests.get(fetch_url, timeout=10) # 10-second timeout
+            
+            if response.status_code == 200:
+                data = response.json()
+                webhook_prompt = data.get("full_prompt")
+                if not webhook_prompt:
+                    st.error(f"Error: Webservices returned data for {analysis_id}, but the 'full_prompt' was missing.")
+            else:
+                st.error(f"Error fetching data for {analysis_id} from webservice. Status: {response.status_code}, Response: {response.text}")
+
+        except requests.exceptions.RequestException as e:
+            st.error(f"Failed to connect to the webservice at {WEBSERVICE_URL}. Error: {e}")
+            webhook_prompt = None
+    else:
+        # This part is handled later in the chat display logic
+        pass
 
 # Sidebar with enhanced options
 with st.sidebar:

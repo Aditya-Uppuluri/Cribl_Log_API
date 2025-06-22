@@ -195,13 +195,13 @@ def dashboard():
 @app.route("/log-to-chatbot", methods=["GET", "POST", "PUT"])
 def receive_log():
     """
-    Enhanced webhook that buffers the last 100 logs and sends them for analysis.
+    UPDATED: Buffers logs, stores the full prompt, and creates a small URL with an analysis_id.
     """
     logger.info(f"📥 Received {request.method} request to /log-to-chatbot")
     if request.method == "GET":
         return jsonify({ "message": "Webhook endpoint is active. POST log data here." })
 
-    # --- [Existing data parsing logic] ---
+    # --- Data parsing logic ---
     try:
         raw_data = request.get_data()
         if request.headers.get('Content-Encoding') == 'gzip':
@@ -213,10 +213,8 @@ def receive_log():
     except Exception as e:
         logger.error(f"❌ Error parsing request data: {str(e)}")
         return jsonify({ "status": "error", "message": f"Error parsing request data: {str(e)}" }), 400
-    
-    # --- [START OF NEW LOGIC] ---
 
-    # 1. Add new log entries to the global buffer
+    # --- Log buffering logic ---
     if data_text and data_text.strip():
         # Split by newline to handle multiple log lines in a single payload
         new_entries = data_text.strip().split('\n')
@@ -227,31 +225,14 @@ def receive_log():
         # Acknowledge the request without creating an analysis task
         return jsonify({"status": "acknowledged", "message": "Request contained empty log data."}), 200
 
-    # 2. The 'logs' for analysis is now the consolidated content of the entire buffer
+    # The 'logs' for analysis is the consolidated content of the entire buffer
     logs = "\n".join(log_buffer)
-
-    # --- [END OF NEW LOGIC] ---
 
     analysis_id = f"cribl_{str(uuid.uuid4())[:8]}"
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     logger.info(f"⚙️ Processing analysis request #{analysis_id} using the last {len(log_buffer)} log entries.")
- 
-    # Store initial result with debug info reflecting the buffer state
-    analysis_results[analysis_id] = {
-        "timestamp": timestamp,
-        "log_preview": f"--- CONTEXT: LAST {len(log_buffer)} LOGS ---\n{logs[:500]}",
-        "status": "processing",
-        "chatbot_url": None,
-        "error": None,
-        "debug_info": {
-            "content_type": request.content_type,
-            "incoming_data_length": len(data_text),
-            "buffer_size": len(log_buffer),
-            "method": request.method,
-        }
-    }
- 
+
     # Enhanced prompt that uses the entire log buffer
     prompt = f"""Analysis ID: {analysis_id}
 
@@ -273,26 +254,41 @@ Please perform comprehensive predictive and prescriptive security analysis on th
 ⚡ IMMEDIATE ACTIONS:
 🛡️ RECOMMENDATIONS:
 """
- 
+
+    # --- Create short URL and store full prompt for fetching ---
+
+    # 1. Create a short URL with only the analysis_id
+    chatbot_url = f"{STREAMLIT_APP_URL}?analysis_id={analysis_id}"
+
+    # 2. Store the full, complete prompt in our results dictionary
+    # The Streamlit app will fetch this in the background.
+    analysis_results[analysis_id] = {
+        "timestamp": timestamp,
+        "log_preview": f"--- CONTEXT: LAST {len(log_buffer)} LOGS ---\n{logs[:500]}",
+        "status": "processing",
+        "chatbot_url": chatbot_url, # The short URL is stored here
+        "full_prompt": prompt,     # The full prompt is stored here
+        "error": None,
+        "debug_info": {
+            "content_type": request.content_type,
+            "buffer_size": len(log_buffer),
+            "method": request.method,
+        }
+    }
+    
     try:
-        # URL encode the consolidated prompt
-        encoded_prompt = urllib.parse.quote(prompt, safe='')
-        chatbot_url = f"{STREAMLIT_APP_URL}?prompt={encoded_prompt}"
-        
-        analysis_results[analysis_id]["chatbot_url"] = chatbot_url
+        # Finalize the result as successful and ready to be fetched
         analysis_results[analysis_id]["status"] = "success"
-        
-        logger.info(f"✅ Analysis #{analysis_id} URL generated successfully using {len(log_buffer)} logs.")
-            
+        logger.info(f"✅ Analysis #{analysis_id} is ready to be fetched at URL: {chatbot_url}")
+
         return jsonify({
             "status": "success",
             "analysis_id": analysis_id,
-            "message": f"Log analysis #{analysis_id} initiated using the last {len(log_buffer)} entries.",
-            "chatbot_url": chatbot_url,
-            "dashboard_url": f"{request.url_root}dashboard",
-            "log_buffer_size": len(log_buffer)
+            "message": f"Analysis for the last {len(log_buffer)} logs is ready to be fetched.",
+            "chatbot_url": chatbot_url, # Return the short URL
+            "dashboard_url": f"{request.url_root}dashboard"
         }), 200
-        
+
     except Exception as e:
         analysis_results[analysis_id]["status"] = "error"
         analysis_results[analysis_id]["error"] = str(e)
