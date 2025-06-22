@@ -7,6 +7,8 @@ from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_core.prompts import ChatPromptTemplate
 import urllib.parse
 import json
+import hashlib
+import time
 import requests
 from datetime import datetime
 import re
@@ -211,10 +213,14 @@ query_params = st.query_params
 webhook_prompt = None
 is_webhook_request = False
 
+# Function to create a hash of the log batch (for duplicate detection)
+def get_log_batch_hash(logs):
+    return hashlib.md5(logs.encode()).hexdigest()[:8]
+
 if "analysis_id" in query_params:
     analysis_id = query_params["analysis_id"]
     is_webhook_request = True
-    
+
     # Use a hash of the ID for duplicate detection
     webhook_hash = get_webhook_hash(analysis_id)
 
@@ -225,19 +231,56 @@ if "analysis_id" in query_params:
         Fetching log data from webservice...
     </div>
     """, unsafe_allow_html=True)
-    
+
     # Check if this ID was already processed
     if webhook_hash not in st.session_state.processed_webhooks:
         try:
             # PULL the data from the webservice
             fetch_url = f"{WEBSERVICE_URL}/results/{analysis_id}"
-            response = requests.get(fetch_url, timeout=10) # 10-second timeout
-            
+            response = requests.get(fetch_url, timeout=10)  # 10-second timeout
+
             if response.status_code == 200:
                 data = response.json()
                 webhook_prompt = data.get("full_prompt")
-                if not webhook_prompt:
-                    st.error(f"Error: Webservices returned data for {analysis_id}, but the 'full_prompt' was missing.")
+
+                if webhook_prompt:
+                    # Mark the webhook as processed
+                    st.session_state.processed_webhooks.add(webhook_hash)
+
+                    # Display the log preview
+                    st.markdown("<h4>Log Preview:</h4>", unsafe_allow_html=True)
+                    st.markdown(f"<pre>{data.get('log_preview', 'No preview available')}</pre>", unsafe_allow_html=True)
+
+                    # Check if the current log batch has already been processed
+                    batch_hash = get_log_batch_hash(webhook_prompt)
+                    if batch_hash in st.session_state.processed_batches:
+                        st.write(f"🔄 Using cached result for batch {batch_hash}")
+                    else:
+                        # Process and send logs to LLM
+                        with st.spinner("🔍 Performing predictive and prescriptive log analysis..."):
+                            try:
+                                # Ask the LLM to summarize the log data
+                                llm_response = llm.invoke({"input": webhook_prompt})
+
+                                # Store the result
+                                st.session_state.processed_batches.add(batch_hash)  # Cache the batch
+                                st.write(f"LLM Analysis: {llm_response.content}")
+                                
+                                # Store the analysis result
+                                store_analysis_result(analysis_id, webhook_prompt, llm_response.content, "completed")
+
+                                # Show success message
+                                st.markdown(f"""
+                                <div class="analysis-result">
+                                    <strong>✅ Analysis Complete</strong><br>
+                                    Analysis ID: <code>{analysis_id}</code><br>
+                                    Results stored and available in the dashboard.
+                                </div>
+                                """, unsafe_allow_html=True)
+                            except Exception as e:
+                                st.error(f"Error performing analysis: {e}")
+                else:
+                    st.error(f"Error: Webservice returned data for {analysis_id}, but the 'full_prompt' was missing.")
             else:
                 st.error(f"Error fetching data for {analysis_id} from webservice. Status: {response.status_code}, Response: {response.text}")
 
@@ -245,8 +288,9 @@ if "analysis_id" in query_params:
             st.error(f"Failed to connect to the webservice at {WEBSERVICE_URL}. Error: {e}")
             webhook_prompt = None
     else:
-        # This part is handled later in the chat display logic
-        pass
+        # Handle repeated analysis (when the same request was processed already)
+        st.info(f"🔄 This webhook request (Hash: {webhook_hash}) has already been processed. Check the results dashboard.")
+
 
 # Sidebar with enhanced options
 with st.sidebar:
