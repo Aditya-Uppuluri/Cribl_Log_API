@@ -4,9 +4,10 @@ import os
 import uuid
 from datetime import datetime
 import json
+import gzip
 import logging
 import urllib.parse
- 
+
 app = Flask(__name__)
  
 # Enhanced logging
@@ -186,14 +187,16 @@ def dashboard():
                                 webhook_url=webhook_url,
                                 streamlit_url=STREAMLIT_APP_URL)
  
+
+# Replace your receive_log() function with this enhanced version:
 @app.route("/log-to-chatbot", methods=["GET", "POST", "PUT"])
 def receive_log():
-    """Enhanced webhook endpoint with better debugging"""
+    """Enhanced webhook endpoint with GZIP decompression support"""
     
     # Log all incoming requests
     logger.info(f"📥 Received {request.method} request to /log-to-chatbot")
     logger.info(f"Content-Type: {request.content_type}")
-    logger.info(f"Headers: {dict(request.headers)}")
+    logger.info(f"Content-Encoding: {request.headers.get('Content-Encoding', 'None')}")
     
     if request.method == "GET":
         return jsonify({
@@ -204,32 +207,76 @@ def receive_log():
             "streamlit_url": STREAMLIT_APP_URL
         })
     
-    # Handle different content types from Cribl
+    # Handle different content types and encodings from Cribl
     try:
+        # Get raw data first
+        raw_data = request.get_data()
+        
+        # Check if data is GZIP compressed
+        if request.headers.get('Content-Encoding') == 'gzip':
+            logger.info("🗜️ Decompressing GZIP data...")
+            try:
+                # Decompress GZIP data
+                decompressed_data = gzip.decompress(raw_data)
+                data_text = decompressed_data.decode('utf-8')
+                logger.info(f"✅ Successfully decompressed {len(raw_data)} bytes to {len(data_text)} characters")
+            except Exception as decomp_error:
+                logger.error(f"❌ GZIP decompression failed: {str(decomp_error)}")
+                return jsonify({
+                    "status": "error",
+                    "message": f"GZIP decompression failed: {str(decomp_error)}",
+                    "debug": {
+                        "content_encoding": request.headers.get('Content-Encoding'),
+                        "content_length": len(raw_data),
+                        "raw_data_preview": str(raw_data[:50])
+                    }
+                }), 400
+        else:
+            # Not compressed, use as-is
+            data_text = raw_data.decode('utf-8')
+        
+        # Now parse the decompressed/raw data
         if request.content_type and 'application/json' in request.content_type:
             # Handle JSON payload
-            data = request.get_json()
-            if isinstance(data, list):
-                # Multiple log entries
-                logs = '\n'.join([json.dumps(entry, indent=2) if isinstance(entry, dict) else str(entry) for entry in data])
-            elif isinstance(data, dict):
-                # Single log entry
-                logs = json.dumps(data, indent=2)
-            else:
-                logs = str(data)
+            try:
+                data = json.loads(data_text)
+                if isinstance(data, list):
+                    # Multiple log entries
+                    logs = '\n'.join([json.dumps(entry, indent=2) if isinstance(entry, dict) else str(entry) for entry in data])
+                elif isinstance(data, dict):
+                    # Single log entry
+                    logs = json.dumps(data, indent=2)
+                else:
+                    logs = str(data)
+            except json.JSONDecodeError:
+                # If JSON parsing fails, treat as text
+                logs = data_text
+        elif request.content_type and 'ndjson' in request.content_type:
+            # Handle NDJSON (newline-delimited JSON)
+            logger.info("📄 Processing NDJSON data...")
+            logs_list = []
+            for line in data_text.strip().split('\n'):
+                if line.strip():
+                    try:
+                        parsed_line = json.loads(line)
+                        logs_list.append(json.dumps(parsed_line, indent=2))
+                    except json.JSONDecodeError:
+                        logs_list.append(line)
+            logs = '\n'.join(logs_list)
         else:
             # Handle plain text or other formats
-            logs = request.get_data(as_text=True)
+            logs = data_text
             
         if not logs or logs.strip() == "":
-            logger.warning("⚠️ Received empty log data")
+            logger.warning("⚠️ Received empty log data after processing")
             return jsonify({
                 "status": "error",
-                "message": "No log data received",
+                "message": "No log data received after processing",
                 "debug": {
                     "content_type": request.content_type,
-                    "data_length": len(request.get_data()),
-                    "raw_data": request.get_data(as_text=True)[:200]
+                    "content_encoding": request.headers.get('Content-Encoding'),
+                    "raw_data_length": len(raw_data),
+                    "processed_data_length": len(data_text) if 'data_text' in locals() else 0
                 }
             }), 400
             
@@ -240,6 +287,7 @@ def receive_log():
             "message": f"Error parsing request data: {str(e)}",
             "debug": {
                 "content_type": request.content_type,
+                "content_encoding": request.headers.get('Content-Encoding'),
                 "data_length": len(request.get_data()),
                 "headers": dict(request.headers)
             }
@@ -249,7 +297,7 @@ def receive_log():
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     
     logger.info(f"📥 Processing log analysis request #{analysis_id}")
-    logger.info(f"Log preview: {logs[:200]}...")
+    logger.info(f"Processed log preview: {logs[:200]}...")
  
     # Store initial result with debug info
     analysis_results[analysis_id] = {
@@ -260,6 +308,7 @@ def receive_log():
         "error": None,
         "debug_info": {
             "content_type": request.content_type,
+            "content_encoding": request.headers.get('Content-Encoding'),
             "data_length": len(logs),
             "method": request.method,
             "headers": dict(request.headers)
@@ -298,7 +347,7 @@ Focus on insider threats, anomalous behavior, and security incidents."""
         
         logger.info(f"✅ Analysis #{analysis_id} URL generated successfully")
         logger.info(f"Chatbot URL length: {len(chatbot_url)} characters")
-        logger.info(f"Streamlit URL: {STREAMLIT_APP_URL}")
+        logger.info(f"Readable log preview: {logs[:100]}...")
             
         return jsonify({
             "status": "success",
