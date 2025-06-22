@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 analysis_results = {}
 
 # CORRECT STREAMLIT URL - Update this with your actual URL
-STREAMLIT_APP_URL = "https://criblchatbot-hswvo3hhkgngsfvmwty9ql.streamlit.app"
+STREAMLIT_APP_URL = "https://criblchatbot-ksbwyaufrk8t2lt6dmhdgc.streamlit.app"
  
 # HTML template for viewing results (keeping your existing template but with fixes)
 HTML_TEMPLATE = """
