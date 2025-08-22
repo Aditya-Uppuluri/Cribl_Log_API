@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  flask-api:
+    build: .
+    ports:
+      - "5000:5000"
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - FLASK_DEBUG=False
+      - PORT=5000
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Optional: Add Redis for persistent storage
+  # redis:
+  #   image: redis:alpine
+  #   restart: unless-stopped
+  #   volumes:
+  #     - redis_data:/data
+
+  # Optional: Add PostgreSQL for persistent storage
+  # postgres:
+  #   image: postgres:13
+  #   environment:
+  #     POSTGRES_DB: cribl_logs
+  #     POSTGRES_USER: postgres
+  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+  #   volumes:
+  #     - postgres_data:/var/lib/postgresql/data
+  #   restart: unless-stopped
+
+# volumes:
+#   redis_data:
+#   postgres_data:
